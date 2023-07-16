@@ -1,0 +1,857 @@
+---
+title: "ADA_Assignment"
+author: "Group 7 ADA "
+date: "2023-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Dictionairy
+
+Variable Name | Description
+:--------------------------: | :--------------------------:
+annual_inc|	The self-reported annual income provided by the borrower during registration.
+dti|	A ratio calculated using the borrower’s total monthly debt payments on the total debt obligations, excluding mortgage and the requested LC loan, divided by the borrower’s| self-reported monthly income.
+emp_length|	Employment length in years. Possible values are between 0 and 10 where 0 means less than one year and 10 means ten or more years. 
+grade|	LC assigned loan grade
+home_ownership|	The home ownership status provided by the borrower during registration or obtained from the credit report. Our values are: RENT, OWN, MORTGAGE, OTHER
+installment|	The monthly payment owed by the borrower if the loan originates.
+int_rate|	Interest Rate on the loan
+loan_amnt|	The listed amount of the loan applied for by the borrower. If at some point in time, the credit department reduces the loan amount, then it will be reflected in this value.
+purpose|	A category provided by the borrower for the loan request. 
+term|	The number of payments on the loan. Values are in months and can be either 36 or 60.
+total_acc|	The total number of credit lines currently in the borrower's credit file
+total_pymnt|	Payments received to date for total amount funded
+## Importing libraries
+
+```{r warning=FALSE, include=FALSE}
+
+# Install and load required packages
+
+# install.packages("factoextra")
+# install.packages("cluster")
+# install.packages("dplyr")
+# install.packages("psych")
+# install.packages("psychTools")
+# install.packages("readxl")
+# install.packages("tidyverse")
+# install.packages("devtools")
+#install_github("kbroman/broman")
+library(devtools)
+library(factoextra)
+library(cluster)
+library(tidyverse)
+library(dplyr)
+library(psych)
+library(psychTools)
+library(readxl)
+library(splitstackshape)
+library(ROSE)
+library(plyr)
+library(corrplot)
+library(ggpubr)
+library(gridExtra)
+library(cluster)
+library(dbscan)
+library(stats)
+library(arsenal)
+library(pvclust)
+library(plotly)
+library(cluster)
+library(scatterplot3d)
+
+
+```
+
+```{r warning=FALSE}
+# Load the dataset
+df <- read_excel("loan_data_ADA_assignment.xlsx")
+describe(df)
+summary(df)
+str(df)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Get the clear idea what variables contain the most NA value
+datatype = summarise(df, lapply(df, class))
+na <- as.data.frame(t(summarise_all(df, ~sum(is.na(.x)))))
+na <- cbind(VariableName = rownames(na), na)
+na <- cbind(dataType = datatype, na)
+rownames(na) <- NULL
+colnames(na)[3] <- "NAValues"
+colnames(na)[1] <- "DataType"
+na <- na[order(-na$NAValues),]
+
+na$DataType <- as.character(na$DataType)
+```
+
+```{r warning=FALSE}
+#picked the relevant variables
+fdf <- df %>% select (annual_inc,dti,emp_length,installment,int_rate,loan_amnt,term,total_acc,total_pymnt,grade,home_ownership,purpose,loan_is_bad) 
+
+```
+
+	
+
+
+```{r warning=FALSE}
+set.seed(10)
+
+#sampling 500 observations from the data
+sample <- fdf[sample(nrow(fdf), 500, replace = FALSE), ]
+describe(sample)
+headTail(sample)
+summary(sample)
+str(sample)
+
+#changing the emp_length from NAS to zero
+sample$emp_length[is.na(sample$emp_length)] <-0 
+summarise_all(sample,~sum(is.na(.x)))
+
+#selecting only integer variables
+sample_only_int <- sample[,-c(10,11,12,13)]
+
+```
+
+```{r warning=FALSE}
+
+#normalise data using custom function
+minMax <- function(x) {
+  (x - min(x)) / (max(x) - min(x))
+}
+ 
+#scaling
+sample_only_int <- as.data.frame(lapply(sample_only_int, minMax))
+head(sample_only_int)
+
+
+```
+
+
+
+# Check the correlation and other factors for Cluster Analysis
+
+```{r warning=FALSE}
+( sampleMatrix<-round(cor(sample_only_int),2) )
+
+lowerCor(sample_only_int)
+
+KMO(sample_only_int)
+#overall MSA is 0.51, so there is multicollinearity in this data, as confirmed by Correlation matrix
+
+cortest.bartlett(sample_only_int)
+
+```
+overall MSA is 0.51, so there is multicollinearity in this data, as confirmed by Correlation matrix
+
+We can see that the columns `annual_inc,dti,emp_length` have very less correlation with all other variables, so these variables are taken on their own, while the other columns are grouped together to perform PCA and factor analysis.
+
+
+```{r warning=FALSE}
+
+pcs_in_sample = sample_only_int %>% select(installment,int_rate,loan_amnt,term,total_acc,total_pymnt)   #or sample_only_int
+
+sample_non_pcs <- sample_only_int %>% select(annual_inc,dti,emp_length)  #total_rec_late_fee and recoveries contains mostly zeroes
+
+```
+
+
+```{r warning=FALSE}
+
+#correlation between variables selected for PC
+( sampleMatrix<-round(cor(pcs_in_sample),2) )
+
+lowerCor(pcs_in_sample)
+
+#checking KMO for variables selected for PC
+KMO(pcs_in_sample)
+options(scipen = 9999)
+cortest.bartlett(pcs_in_sample)
+```
+
+
+```{r warning=FALSE}
+#Finding Mahalanobis distance
+Maha <- mahalanobis(sample_only_int,colMeans(sample_only_int),cov(sample_only_int))
+
+MahaPvalue <-pchisq(Maha,df=8,lower.tail = FALSE)
+print(sum(MahaPvalue<0.01))
+
+```
+There are only 28 outliers after Mahalanobis distance, which is acceptable.
+Anyways, we will remove these outliers later on and compare the results.
+
+
+# PCA
+
+```{r warning=FALSE}
+#first we will do PCA on selected columns sample, then proceed on doing it on sample_outp (sample without the outliers)
+pca <- prcomp(pcs_in_sample, center = TRUE, scale. =TRUE)
+pca
+```
+
+
+```{r warning=FALSE}
+#Getting Eigen values for all PCs
+eig.val <- get_eigenvalue(pca)
+eig.val
+```
+
+First 2 PCs has Eigen values>1, but explain 75% of the variance.
+We can explain 89.4% of variance if we consider the first 3 PCs, which is much better.
+
+
+```{r warning=FALSE}
+#Scree plot
+fviz_eig(pca, addlabels = TRUE, ylim=c(0,80))
+
+```
+
+
+Variance explained by each PC
+
+
+```{r warning=FALSE}
+pca_vars = get_pca_var(pca)
+print(pca_vars)
+pca_vars$coord
+
+corrplot(pca_vars$cos2, is.corr=FALSE)
+
+```
+
+Heat map of all PCs, which visualizes the quality of representation of each variable in the principal component space. 
+
+
+
+
+```{r warning=FALSE}
+#plotting the top10 rows which contributed to the PC
+fviz_contrib(pca,choice="ind",axes=1:2,top=10)
+
+```
+
+
+
+
+Indexes of top 10 rows which contribute the most to first 2 PCs
+
+
+
+# Checking by removing outliers
+
+
+```{r warning=FALSE}
+sampleMaha<-cbind(sample_only_int, Maha, MahaPvalue)
+
+#sample after removing outliers
+sample_outp = subset(sampleMaha,MahaPvalue>0.01)
+
+sample_outp <- sample_outp[,-c(1,2,3,10,11)]
+
+pca_outp <- prcomp(sample_outp, center = TRUE, scale. =TRUE)
+pca_outp
+
+#Eigen value of PCs after removing outliers
+eig.val.outp <- get_eigenvalue(pca_outp)
+eig.val.outp
+
+```
+
+
+```{r warning=FALSE}
+#visulaization of amount of variance explained by the dimensions (not cumulative) for sample after removing outliers
+fviz_eig(pca_outp, addlabels = TRUE, ylim=c(0,70))
+
+
+#visulaization of amount of variance explained by the dimensions (not cumulative) for sample before removing outliers
+fviz_eig(pca, addlabels = TRUE, ylim=c(0,70))
+
+
+```
+
+Since removing outliers and not removing outliers are giving us almost the same results, we will not be removing outliers for construction of PCs. (Also, removing outliers just accounted for just about 1% increase in expaining the variance; for simplicity of our analysis, we decide to keep the outliers)
+
+
+
+```{r warning=FALSE}
+#using principal() to find PC weights and scores for each row
+pcModel<-principal(pcs_in_sample, 6, rotate="none", weights=TRUE, scores=TRUE)
+
+print.psych(pcModel, cut=0.3, sort = TRUE)
+plot(pcModel$values, type = "b")
+
+```
+
+Standardized loadings (pattern matrix) is the correlation matrix between the principal components and the original variables height and weight.
+
+SS loadings are the sum of square loadings of the principal components, which are the variances of the principal components, and they sum up to 6 (the number of all principal components.)
+
+This command prints the factor loading matrix associated the model, but displaying only the loadings above 0.3 and sorting items by the size of their loadings.
+
+
+# Factor Analysis
+
+## PC Extraction: quartimax, oblimin, and Varimax
+
+Three factors solution
+
+
+```{r warning=FALSE}
+#Oblimin rotation
+pcModel3o<-principal(pcs_in_sample, 3, rotate="oblimin")
+print.psych(pcModel3o, cut=0.3, sort=TRUE)
+
+pcModel4o<-principal(pcs_in_sample, 4, rotate="oblimin")
+print.psych(pcModel4o, cut=0.3, sort=TRUE)
+
+#Varimax rotation
+pcModel3v<-principal(pcs_in_sample, 3, rotate="varimax")
+print.psych(pcModel3v, cut=0.3, sort=TRUE)
+
+pcModel4v<-principal(pcs_in_sample, 4, rotate="varimax")
+print.psych(pcModel4v, cut=0.3, sort=TRUE)
+
+#Quartimax rotation
+pcModel3q<-principal(pcs_in_sample, 3, rotate="quartimax")
+print.psych(pcModel3o, cut=0.3, sort=TRUE)
+
+pcModel4q<-principal(pcs_in_sample, 4, rotate="quartimax")
+print.psych(pcModel4o, cut=0.3,sort=TRUE)
+
+
+```
+
+
+
+## ML Extraction with no rotation, Oblimin, Quartimax and Varimax rotation for 3 and 4 factors 
+
+```{r warning=FALSE}
+#3 factor
+faModel_ML <- (fa(pcs_in_sample, 3, n.obs=500, rotate="none", fm="ml"))
+print(faModel_ML, cut=0.3,sort="TRUE")
+fa.diagram(faModel_ML)
+
+# 4 factors
+faModel_ML <- (fa(pcs_in_sample, 4, n.obs=500, rotate="none", fm="ml"))
+print(faModel_ML, cut=0.3,sort="TRUE")
+fa.diagram(faModel_ML)
+
+
+#3 factor oblimin
+fa3o<-(fa(pcs_in_sample,3, n.obs=500, rotate="oblimin", fm="ml"))
+print.psych(fa3o, cut=0.3,sort="TRUE")
+fa.diagram(fa3o)
+
+#4 factor oblimin
+fa4o<-(fa(pcs_in_sample,4, n.obs=500, rotate="oblimin", fm="ml"))
+print.psych(fa4o, cut=0.3,sort="TRUE")
+fa.diagram(fa4o)
+
+#3 factor varimax
+fa3v<-(fa(pcs_in_sample,3, n.obs=500, rotate="varimax", fm="ml"))
+print.psych(fa3v, cut=0.3,sort="TRUE")
+fa.diagram(fa3v)
+
+#4 factor varimax
+fa4v<-(fa(pcs_in_sample,4, n.obs=500, rotate="varimax", fm="ml"))
+print.psych(fa4v, cut=0.3,sort="TRUE")
+fa.diagram(fa4v)
+
+#3 factor quartimax
+fa3q<-(fa(pcs_in_sample,3, n.obs=500, rotate="quartimax", fm="ml"))
+print.psych(fa3q, cut=0.3,sort="TRUE")
+fa.diagram(fa3q)
+
+#4 factor quartimax
+fa4q<-(fa(pcs_in_sample,4, n.obs=500, rotate="quartimax", fm="ml"))
+print.psych(fa4q, cut=0.3,sort="TRUE")
+fa.diagram(fa4q)
+
+
+```
+
+<p>
+<b>We have comapred all the possible rotations for PCA and FA, and after comparing the results, we decided to proceed with PCA with no rotation, which is giving us the best interpretations of the cluster. </b>
+</p>
+
+
+
+## Computing PC model scores and weights for chosen model
+```{r warning=FALSE}
+#PC model scores
+print.psych(pcModel, cut=0.3, sort=TRUE)
+```
+
+
+
+The beta weights are used to calculate the principal component scores from the data, we can access these weights by using
+
+```{r warning=FALSE}
+pcModel$weights
+```
+
+we can then access these scores by using 
+```{r}
+head(pcModel$scores, 10)
+```
+
+We can use the principal component scores for further analysis, before doing that we need to add them into our dataframe: (so that we now have the variables which were not used for PCA and first 3PCs)
+
+```{r warning=FALSE}
+
+#binding the PC scores for each row with corresponding nonPc variables.
+sample_withPC <- cbind(sample_non_pcs, pcModel$scores)
+
+#removing last 3 columns because we are selecting only the first 3 Principal components which explains 89.4% of the variance.
+sample_withPC <- sample_withPC[,-c(7,8,9)]
+head(sample_withPC)
+```
+
+# Clustering 
+
+We are combining hierarchical and non-hierarchical methods for clustering the data. 
+We use hierarchical clustering to decide on appropriate number of clusters i.e GapStat. (we also followed elbow method to ensure optimum number of clusters is 4). 
+After deciding on optimum number of clusters, we use K-Means method to cluster the solution. K-Means also have the ability to allow objects to move between clusters.
+
+<p>
+We are using K-Means, also because of the fact that results are not very sensitive to outliers and analysis decisions, and this can be easily applied to the large dataset with 50,000 rows. Also, undesirable early combinations in hierarchical clustering may lead to misleading results, which is why we dont use that method in clustering here. </p>
+
+### computing GapStat
+
+```{r warning=FALSE}
+#computing gapstat tpo find the optimum number of clusters
+gap_stat <- clusGap(sample_withPC, FUN = hcut, nstart = 25, K.max = 10, B = 50)  #just PCs is giving no of clusters as 1.; sample and sample with PCs gives 3.
+fviz_gap_stat(gap_stat)
+```
+
+
+```{r warning=FALSE}
+#confirming the optimum number of clusters with elbow method
+fviz_nbclust(sample_withPC, kmeans, method = "wss")
+
+```
+
+
+
+# 1) Kmeans
+
+```{r warning=FALSE}
+set.seed(123)
+
+km <- kmeans(sample_withPC, centers = 4, nstart = 25, iter.max=100000)
+km
+
+```
+Different `nstart` values gives the same clustering value which shows that our results are stable, which also confirms that With well chosen seeds, the results are not very sensitive to outliers and analysis decisions in non-hierarchical clustering. 
+
+
+
+
+```{r warning=FALSE}
+#loading cluster labels to a vector "clus"
+clus <- factor(km$cluster)
+
+#binding the categorical variables back to the sample
+sample_new = cbind(sample_withPC,sample[,c(10,11,12,13)])
+
+#adding cluster labels to the sample
+sample_new = cbind(sample_new,clus)
+head(sample_new)
+
+```
+
+
+Now we proceed to calculate Silhouette score
+```{r warning=FALSE}
+library(cluster)
+
+# Compute the silhouette measure for each data point
+sil_scores <- silhouette(km$cluster, dist(sample_new))
+
+# Compute the average silhouette score for all data points
+avg_sil_score <- mean(sil_scores[, 3])
+
+# Print the average silhouette score
+cat("Average Silhouette Score:", round(avg_sil_score, 2))
+
+```
+This is a good enough Silhouette score for our cluster, so we proceed with our analysis.
+
+
+```{r warning=FALSE}
+library(openxlsx)
+
+# Write the dataframe to an Excel file
+write.xlsx(sample_new, file = "sample_after_clustering.xlsx", sheetName = "Sheet1")
+
+```
+
+
+
+# Interpretation of clusters
+
+<b> 1) analysis of centroids </b>
+
+```{r warning=FALSE}
+
+#getting the mean values for each column of the sample
+hcentres<-aggregate(x=sample, by=list(cluster=clus), FUN="mean")
+print(hcentres)
+
+```
+
+<b> Interpretations from Cluster centroid analysis  </b> 
+
+We can see that cluster 1 has mean annual income of about 52433, shortest average employee length (4.87), lowest average installment (280.64), lowest average loan amount of 8282,average term is 3 years, total_account average is 16.066, and lowest average total payment received of 9000; among the clusters.
+Therefore, Cluster 1 may represent loan applicants who are young(avg emp_length is 4.87) and has a comparatively low annual income; who took less amount in loan (which explains the lower installment values)
+
+Cluster 2 has a high mean annual income of about 100531,Largest average interest rate of 19.06, 2nd largest average installment of 598, largest mean loan amount of 22906, highest average term of 5 years.
+These represent loan applicants who has the most salary and who takes a hugh amount on loan for a large period of time(average 5 years), at large interest rates(average is 19.06)
+
+
+Cluster 3 has mean annual income of 89259, largest installment of 744, and largest total_payment.
+These reprsent employees with medium income levels who asks for a large amount of loan and pays the largest installlment, and has the highest total_payment.
+
+Cluster 4 has mean annual income of 78351 (also medium income), largest total_acc but much lower installments and total_payment These repersent employees with medium income levels who ask for a comparitively lower amount as loan, who pays lower installment values as a result.
+
+<p> <i>
+In short, Cluster 1 contains individuals of low income (who ask for a low loan), Cluster 2 consists of employees of high income (asking for a high loan). Meanwhile, medium income customers are classified into clusters 3 ;who ask for a high loan; and Cluster 4,who ask for a low amount of loan. 
+</i> </p>
+
+
+<b> 2) Visualizations of clusters </b>
+
+
+The main relationships in the sample is visualized below which will confirm the above analysis
+
+```{r warning=FALSE}
+
+ggplot(sample, aes(installment, loan_amnt, color = clus)) + 
+  geom_point() + 
+  theme_bw()
+
+```
+
+
+We can observe that cluster 3 mostly refers to people with high installments and high loan_amount and  
+Cluster 1 represents people with low installments and low loan amounts generally, as discussed above.
+
+
+```{r warning=FALSE}
+
+ggplot(sample, aes(grade, int_rate, color = clus)) + 
+  geom_jitter() + 
+  theme_bw()
+
+```
+
+
+Most of the lower grades belong to cluster 2.
+
+```{r warning=FALSE}
+
+ggplot(sample, aes(annual_inc, grade, color = clus)) + 
+  geom_point() + xlim(10000,250000) +
+  theme_bw()
+
+```
+
+Cluster 1 mostly represents people with low annual income. (Annual_inc and grade has no correlation at all)
+Cluster 3 represent customers with a lower grade.
+
+
+```{r warning=FALSE}
+
+ggplot(sample, aes(term,int_rate, color = clus)) + 
+  geom_point() + 
+  theme_bw()
+
+```
+
+Term of 60 months usually belong to cluster 2, while term of 36 months can represent either cluster 1,3, or 4.
+
+
+```{r warning=FALSE}
+ggplot(sample, aes(loan_amnt,int_rate, color = clus)) + 
+  geom_point() + xlim(1000,50000) +                         
+  theme_bw()
+```
+
+
+
+Analysing the distribution of clusters with respect to loan amount and int_rate. 
+
+Cluster 2 asks for a high amount of loan at a high interest rate.
+Cluster 1 asks for the least amount of loan followed by cluster 4.
+Cluster 3 asks fro a high amount of loan at a lower interest rate.
+
+
+```{r warning=FALSE}
+ggplot(sample_new, aes(x = PC1, y = PC2, color = as.factor(km$cluster))) +
+  geom_point() +
+  labs(title = "K-Means Clustering with 4 Centers", x = "Principal Component 1", y = "Principal Component 2")
+
+```
+
+
+Analysing the distribution of clusters with respect to the first two Principal components
+
+```{r warning=FALSE}
+#Representation of the same in 3-d including the 3rd Principal component.
+library(plotly)
+
+plot_ly(sample_new, x = ~PC1, y = ~PC2, z = ~PC3, color = ~as.factor(km$cluster), type = "scatter3d", mode = "markers") %>%
+  layout(scene = list(xaxis = list(title = "Principal Component 1"),
+                      yaxis = list(title = "Principal Component 2"),
+                      zaxis = list(title = "Principal Component 3"),
+                      color = list(title = "Cluster")))
+
+```
+
+
+
+Another effective representation of the same in 3-d including the 3rd Principal component using rgl package
+
+```{r warning=FALSE}
+library(rgl)
+with(sample_new, plot3d(PC1, PC2, PC3, col = km$cluster, type = 's', size = 2))
+
+```
+
+
+```{r warning=FALSE}
+
+# Create a function to calculate the frequency table and plot the distribution for each categorical variable
+freq_plot <- function(df, col) {
+  freq_tbl <- df %>% group_by(clus, !!sym(col)) %>% summarise(count = n())
+  
+  ggplot(freq_tbl, aes(x = !!sym(col), y = count, fill = clus)) + 
+    geom_bar(stat = "identity", position = "dodge") + 
+    ggtitle(paste("Distribution of", col)) + 
+    xlab(col) + ylab("Frequency") +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+
+#we will Call the function for each categorical variable later
+
+
+
+```
+
+
+#### Analysing clusters with categorical variables (Grade, Home Ownership, Purpose and Loan_is_bad)
+
+```{r warning=FALSE}
+table(sample$grade,sample_new$clus)
+
+freq_plot(sample_new, "grade")
+
+ggplot(sample_new, aes(x = grade, fill = clus)) +
+  geom_bar() +
+  labs(title = "Distribution of Grade", x = "Grade", y = "Frequency")
+
+
+```
+
+
+
+Loan applicants of cluster 2 does not have a grade.
+Cluster 1 has a good grade(mostly A and B)
+
+
+```{r warning=FALSE}
+table(sample$home_ownership,sample_new$clus)
+
+freq_plot(sample_new, "home_ownership")
+
+ggplot(sample_new, aes(x = home_ownership, fill = clus)) +
+  geom_bar() +
+  labs(title = "Distribution of Home Ownership", x = "Home-Ownership", y = "Frequency")
+
+
+```
+
+
+Mortgage has almost equal representation of each clusters from 1-4.
+Loan applicants living in rented houses mostly belong to cluster 1.
+People living in own houses rarely apply for loans.
+
+```{r warning=FALSE}
+table(sample$purpose,sample_new$clus)
+
+ggplot(sample_new, aes(x = purpose, fill = clus)) +
+  geom_bar() +
+  labs(title = "Distribution of Purpose", x = "Purpose", y = "Frequency") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+
+
+
+Most people apply for loans for the purpose of debt consolidation(306 out of 500).
+Most of the people applying for loans for credit card purpose and other purposes belong to cluster 1.
+
+Look at the table or graph below (without "credit_card" and "debt_consolidation") for more visibility.
+
+```{r warning=FALSE}
+ggplot(sample_new, aes(x = purpose, fill = clus)) +
+  geom_bar() +
+  labs(title = "Distribution of Purpose", y = "Frequency") +
+  scale_x_discrete(limits = c("car", "home_improvement", "house","major_purchase","medical","moving","other","renewable_energy","small_business","vacation","wedding")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+
+```{r warning=FALSE}
+table(sample$loan_is_bad,sample_new$clus)
+
+freq_plot(sample_new, "loan_is_bad")
+
+ggplot(sample_new, aes(x = loan_is_bad, fill = clus)) +
+  geom_bar() +
+  labs(title = "Distribution of loan_is_bad", x = "Loan is Bad", y = "Frequency")
+
+
+
+```
+
+This plot shows the distribution of `Loan_is_bad` variable in each of the 4 clusters. Cluster 1 has the large number of good loans(174) and largest number of bad loans (35), but this is because it has the most number of observations among the 4 clusters(209 out of 500). However, when you calculate percentages, the proportion of good and bad loans in this cluster is 83.25%, which is almost same as the population mean (84.37%).
+
+Cluster 2 has the smallest percentage of good loans, at only 78.31%, which is low when compared to population mean(84.37%). Additionally, in our sample Cluster 2 contains more number of bad loans than Cluster 4, even though it has only 83 observations compared to 121 observations in cluster 4; This clearly demonstrates that most of the bad loans would be classified to Cluster 2.
+
+Cluster 3 has the smallest number(6 out of 81) and percentage of bad loans at only 6.90%. So, when generalizing, most of the observations classified to Cluster 3 would be good loans.
+
+Cluster 4 has a good loan percentage of 84.29%, which is almost equal to population mean(84.37%)
+
+```{r warning=FALSE}
+
+(1-mean(df$loan_is_bad))*100
+
+loan_is_bad_table = as.data.frame(as.matrix(table(sample$loan_is_bad,sample_new$clus)))
+loan_is_bad_table <- loan_is_bad_table %>% pivot_wider(names_from = Var2,values_from = c(Freq))
+
+colnames(loan_is_bad_table) <- c("Loan is Bad","Cluster 1","Cluster 2", "Cluster 3", "Cluster 4")
+
+# Create a new row with the percentage values
+percentages <- c("Percentage", rep(0, ncol(loan_is_bad_table) - 1))
+for (i in 2:ncol(loan_is_bad_table)) {
+  percentages[i] <- (loan_is_bad_table[1, i] / (loan_is_bad_table[1, i] + loan_is_bad_table[2, i]))*100
+}
+
+# Combine the original dataframe with the new row
+loan_is_bad_table <- rbind(loan_is_bad_table, percentages)
+
+loan_is_bad_table
+
+
+```
+
+
+
+
+<b> 3) Variable Importance: </b>
+
+
+Now we will conduct t-tests for all columns of sample with respect to cluster for each pair of distinct cluster to test for differences in means between two specific clusters
+
+```{r warning=FALSE}
+
+library(broom)
+library(dplyr)
+
+# Conduct t-tests
+ttest_1_2 <- t.test(annual_inc + dti + emp_length + PC1 + PC2 + PC3 ~ clus, data = sample_withPC, subset = (clus %in% c(1,2)))
+ttest_2_3 <- t.test(annual_inc + dti + emp_length + PC1 + PC2 + PC3 ~ clus, data = sample_withPC, subset = (clus %in% c(2,3)))
+ttest_3_4 <- t.test(annual_inc + dti + emp_length + PC1 + PC2 + PC3 ~ clus, data = sample_withPC, subset = (clus %in% c(3,4)))
+ttest_1_4 <- t.test(annual_inc + dti + emp_length + PC1 + PC2 + PC3 ~ clus, data = sample_withPC, subset = (clus %in% c(1,4)))
+
+
+# Store results in dataframe
+ttest_results <- bind_rows(
+  glance(ttest_1_2),
+  glance(ttest_2_3),
+  glance(ttest_3_4),
+  glance(ttest_1_4)
+) %>%
+  select(estimate, statistic, p.value)
+
+# View dataframe
+ttest_results
+
+```
+
+# Validation
+
+```{r warning=FALSE}
+set.seed(123)
+
+
+#creating a sample of 100 observation for validation from our sample of 500 observation.
+validation_sample <- sample_withPC[sample(nrow(sample_withPC),100,replace=FALSE),]
+
+#doing K-Means on those 100 observation
+km_val <- kmeans(validation_sample, centers = 4, nstart = 25, iter.max=100000)
+km_val
+
+validation_sample <- cbind(validation_sample,km_val$cluster)
+
+
+clus_val <- as.data.frame(km_val$cluster)
+
+#finding index of all those 100 observations from our sample!
+index_val <- row.names(clus_val)
+
+
+val_analysis <- sample[index_val, , drop = FALSE]
+
+cluster_orginal <- sample_new[index_val, , drop = FALSE]$clus
+
+sample_withPC_100 = sample_withPC[index_val,]
+
+
+
+#sample of 100 observations with cluster labels
+sample_withPC_100 <- cbind(sample_withPC_100,km_val$cluster,cluster_orginal)
+
+sample_withPC_100$`km_val$cluster`[sample_withPC_100$`km_val$cluster`==1] <- 9
+sample_withPC_100$`km_val$cluster`[sample_withPC_100$`km_val$cluster`==2] <- 1
+sample_withPC_100$`km_val$cluster`[sample_withPC_100$`km_val$cluster`==9] <- 2
+
+
+sample_withPC_100$`km_val$cluster` == sample_withPC_100$cluster_orginal
+
+count(sample_withPC_100$`km_val$cluster` == sample_withPC_100$cluster_orginal)
+
+
+```
+
+We are performing in-sample validation, by taking 100 subsamples randomly from our sample of 500 observations. We did the K-Means clustering again on the sub-sample, and observed that 94 out of the 100 cases we assumed are giving us the same results, which validates our clustering approach and proves that our clustering analysis can be applied in a generalized manner to the whole dataset. 
+
+The cluster centroids of the new clusters are analysed below.
+
+
+
+```{r warning=FALSE}
+hcentres<-aggregate(x=val_analysis, by=list(cluster=km_val$cluster), FUN="mean")
+print(hcentres)
+```
+
+Cluster 2 has a low annual income, low emp_length, low installment and asks for a lower loan amount and thus total_pymnt, which corresponds to Cluster 1 of K-means done earlier.
+
+Similarly, Cluster 1 here corresponds to the cluster 2 of K-Means done earlier, which classifies as the high income customers
+.
+Subsequently, Cluster 3 and 4 corresponds to medium-income customers, as earlier (Cluster 3 corresponds to medium income customers who ask for a high loan amount and cluster 4 corresponds to medium income customers who ask for a low loan amount )
+
+
+
+
+
